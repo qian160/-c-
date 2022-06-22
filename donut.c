@@ -30,3 +30,5 @@ e-c*d*g       )*m   -c*d*e-f*g-l*d*n)     ;if(D>z
        "%c[H",       27);for       (k=1;18       *100+41
        >k;k++)       putchar       (k%80?b       [k]:10)
        ;;;;A+=       0.053;;       B+=0.03       ;;;;;}}
+
+//https://www.a1k0n.net/
