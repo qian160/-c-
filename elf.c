@@ -87,7 +87,7 @@ static void load_elf(char * elf_file) {
             char * name = strtab + sym->st_name;
             printf("%2d: %8lx %8ld %8d %8d %8d %8d %16s\n", i++, sym->st_value, sym->st_size, type, bind, vis, sym->st_shndx, name);
         }
-        munmap(elf_file, sb.st_size);;
+        munmap(elf_file, sb.st_size);
     }
 
 }
