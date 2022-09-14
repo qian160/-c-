@@ -8,8 +8,9 @@
 #include<sys/mman.h>
 /*
         steps:
-            1. Load the ELF header, use its shstrndx and shoff to find the section headers table and .shstrtab(holds strings for all sections' name)
+            1. Read the ELF header, use its 'shstrndx' and 'shoff' field to find the section headers table and .shstrtab section(holds strings for all sections' name)
             2. Tranverse the section headers table, compare the type and name field and find .strtab and .symtab(start of the elf file pluses the offset)
+                (to compare the section's name, the shstrtab will be needed)
             3. To print the symbols, use the data type Elf64_Sym to tranverse the .symtab
         some notes:
             1. The field 'st_name' and 'sh_name' is not a 'name' in fact, to get the string name, we need to use this name field to index into string table
