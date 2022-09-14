@@ -6,7 +6,16 @@
 #include<unistd.h>
 #include<sys/stat.h>
 #include<sys/mman.h>
+/*
+        steps:
+            1. Load the ELF header, use its shstrndx and shoff to find the section headers table and .shstrtab(holds strings for all sections' name)
+            2. Tranverse the section headers table, compare the type and name field and find .strtab and .symtab(start of the elf file pluses the offset)
+            3. To print the symbols, use the data type Elf64_Sym to tranverse the .symtab
+        some notes:
+            1. The field 'st_name' and 'sh_name' is not a 'name' in fact, to get the string name, we need to use this name field to index into string table
+            2. section headers are not sections, they can not directly be used. To find the true sections, use the offset field in the section header and jump there
 
+*/
 static void load_elf(char * elf_file) {
     if(elf_file == NULL)
         return;
