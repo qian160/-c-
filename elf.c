@@ -15,7 +15,6 @@
         some notes:
             1. The field 'st_name' and 'sh_name' is not a 'name' in fact, to get the string name, we need to use this name field to index into string table
             2. section headers are not sections, they can not directly be used. To find the true sections, use the offset field in the section header and jump there
-
 */
 static void load_elf(char * elf_file) {
     if(elf_file == NULL)
@@ -23,7 +22,6 @@ static void load_elf(char * elf_file) {
     else
     {
         int fd = open(elf_file, O_RDONLY);
-        close(fd);
         struct stat sb;
         if(fstat(fd, &sb) == -1){
             printf("fstat error\n");
@@ -34,6 +32,7 @@ static void load_elf(char * elf_file) {
            printf("map failed\n");
            exit(0);
         }
+        close(fd);
         Elf64_Ehdr *elf_header = (Elf64_Ehdr *)elf_file;
 
         Elf64_Half shnum = elf_header -> e_shnum;
