@@ -21,7 +21,7 @@ static void load_elf(char * elf_file) {
         char * elf_file = mmap(NULL, sb.st_size, PROT_READ, MAP_SHARED, fd, 0);
         if(elp_file == MAP_FAILED){
            printf("map failed\n");
-            exit(0);
+           exit(0);
         }
         Elf64_Ehdr *elf_header = (Elf64_Ehdr *)elf_file;
 
