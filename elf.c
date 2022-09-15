@@ -34,7 +34,7 @@ static void load_elf(char * elf_file) {
         }
         close(fd);
         Elf64_Ehdr *elf_header = (Elf64_Ehdr *)elf_file;
-        char *id = elf_header->e_ident;
+        unsigned char *id = elf_header->e_ident;
 
         if(id[0] != 0x7f || id[1] != 'E' || id[2] != 'L' || id[3] != 'F'){
                 printf("bad elf file\n");
