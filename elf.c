@@ -22,6 +22,10 @@ static void load_elf(char * elf_file) {
     else
     {
         int fd = open(elf_file, O_RDONLY);
+        if(fd < 0){
+                printf("failed to open the file\n");
+                return;
+        }
         struct stat sb;
         if(fstat(fd, &sb) == -1){
             printf("fstat error\n");
@@ -44,7 +48,7 @@ static void load_elf(char * elf_file) {
 
         Elf64_Half shnum = elf_header -> e_shnum;
         Elf64_Half shstrndx = elf_header -> e_shstrndx;
-        Elf64_Half shoff = elf_header -> e_shoff;
+        Elf64_Off shoff = elf_header -> e_shoff;
 
         Elf64_Shdr * shdr = (Elf64_Shdr *)(elf_file + shoff);
         char * shstrtab = elf_file + (shdr + shstrndx)->sh_offset;
