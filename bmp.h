@@ -1,1034 +1,774 @@
-Graphics File Formats
+/*
+ * Windows Bitmap File Loader
+ * Version 1.2.5 (20120929)
+ *
+ * Supported Formats: 1, 4, 8, 16, 24, 32 Bit Images
+ * Alpha Bitmaps are also supported.
+ * Supported compression types: RLE 8, BITFIELDS
+ *
+ * Created by: Benjamin Kalytta, 2006 - 2012
+ * Thanks for bug fixes goes to: Chris Campbell
+ *
+ * Licence: Free to use, URL to my source and my name is required in your source code.
+ *
+ * Source can be found at http://www.kalytta.com/bitmap.h
+ *
+ * Warning: This code should not be used in unmodified form in a production environment.
+ * It should only serve as a basis for your own development.
+ * There is only a minimal error handling in this code. (Notice added 20111211)
+ */
 
-This topic describes the graphics-file formats used by the Microsoft Windows
-operating system. Graphics files include bitmap files, icon-resource files,
-and cursor-resource files.
+#ifndef BITMAP_H
+#define BITMAP_H
 
-Bitmap-File Formats
+#include <iostream>
+#include <fstream>
+#include <string>
 
-Windows bitmap files are stored in a device-independent bitmap (DIB) format
-that allows Windows to display the bitmap on any type of display device. The
-term "device independent" means that the bitmap specifies pixel color in a
-form independent of the method used by a display to represent color. The
-default filename extension of a Windows DIB file is .BMP.
+#ifndef __LITTLE_ENDIAN__
+	#ifndef __BIG_ENDIAN__
+		#define __LITTLE_ENDIAN__
+	#endif
+#endif
 
-Bitmap-File Structures
+#ifdef __LITTLE_ENDIAN__
+	#define BITMAP_SIGNATURE 0x4d42
+#else
+	#define BITMAP_SIGNATURE 0x424d
+#endif
 
-Each bitmap file contains a bitmap-file header, a bitmap-information header,
-a color table, and an array of bytes that defines the bitmap bits. The file
-has the following form:
+#if defined(_MSC_VER) || defined(__INTEL_COMPILER)
+	typedef unsigned __int32 uint32_t;
+	typedef unsigned __int16 uint16_t;
+	typedef unsigned __int8 uint8_t;
+	typedef __int32 int32_t;
+#elif defined(__GNUC__) || defined(__CYGWIN__) || defined(__MWERKS__) || defined(__WATCOMC__) || defined(__PGI) || defined(__LCC__)
+	#include <stdint.h>
+#else
+	typedef unsigned int uint32_t;
+	typedef unsigned short int uint16_t;
+	typedef unsigned char uint8_t;
+	typedef int int32_t;
+#endif
 
-BITMAPFILEHEADER bmfh;
-BITMAPINFOHEADER bmih;
-RGBQUAD          aColors[];
-BYTE             aBitmapBits[];
+#pragma pack(push, 1)
 
-The bitmap-file header contains information about the type, size, and layout
-of a device-independent bitmap file. The header is defined as a
-BITMAPFILEHEADER structure.
+typedef struct _BITMAP_FILEHEADER {
+	uint16_t Signature;
+	uint32_t Size;
+	uint32_t Reserved;
+	uint32_t BitsOffset;
+} BITMAP_FILEHEADER;
 
-The bitmap-information header, defined as a BITMAPINFOHEADER structure,
-specifies the dimensions, compression type, and color format for the bitmap.
+#define BITMAP_FILEHEADER_SIZE 14
 
-The color table, defined as an array of RGBQUAD structures, contains as many
-elements as there are colors in the bitmap. The color table is not present
-for bitmaps with 24 color bits because each pixel is represented by 24-bit
-red-green-blue (RGB) values in the actual bitmap data area. The colors in the
-table should appear in order of importance. This helps a display driver
-render a bitmap on a device that cannot display as many colors as there are
-in the bitmap. If the DIB is in Windows version 3.0 or later format, the
-driver can use the biClrImportant member of the BITMAPINFOHEADER structure to
-determine which colors are important.
+typedef struct _BITMAP_HEADER {
+	uint32_t HeaderSize;
+	int32_t Width;
+	int32_t Height;
+	uint16_t Planes;
+	uint16_t BitCount;
+	uint32_t Compression;
+	uint32_t SizeImage;
+	int32_t PelsPerMeterX;
+	int32_t PelsPerMeterY;
+	uint32_t ClrUsed;
+	uint32_t ClrImportant;
+	uint32_t RedMask;
+	uint32_t GreenMask;
+	uint32_t BlueMask;
+	uint32_t AlphaMask;
+	uint32_t CsType;
+	uint32_t Endpoints[9]; // see http://msdn2.microsoft.com/en-us/library/ms536569.aspx
+	uint32_t GammaRed;
+	uint32_t GammaGreen;
+	uint32_t GammaBlue;
+} BITMAP_HEADER;
 
-The BITMAPINFO structure can be used to represent a combined
-bitmap-information header and color table.  The bitmap bits, immediately
-following the color table, consist of an array of BYTE values representing
-consecutive rows, or "scan lines," of the bitmap. Each scan line consists of
-consecutive bytes representing the pixels in the scan line, in left-to-right
-order. The number of bytes representing a scan line depends on the color
-format and the width, in pixels, of the bitmap. If necessary, a scan line
-must be zero-padded to end on a 32-bit boundary. However, segment boundaries
-can appear anywhere in the bitmap. The scan lines in the bitmap are stored
-from bottom up. This means that the first byte in the array represents the
-pixels in the lower-left corner of the bitmap and the last byte represents
-the pixels in the upper-right corner.
+typedef struct _RGBA {
+	uint8_t Red;
+	uint8_t Green;
+	uint8_t Blue;
+	uint8_t Alpha;
+} RGBA;
 
-The biBitCount member of the BITMAPINFOHEADER structure determines the number
-of bits that define each pixel and the maximum number of colors in the
-bitmap. These members can have any of the following values:
+typedef struct _BGRA {
+	uint8_t Blue;
+	uint8_t Green;
+	uint8_t Red;
+	uint8_t Alpha;
+} BGRA;
 
-Value   Meaning
+#pragma pack(pop)
 
-1       Bitmap is monochrome and the color table contains two entries. Each
-bit in the bitmap array represents a pixel. If the bit is clear, the pixel is
-displayed with the color of the first entry in the color table. If the bit is
-set, the pixel has the color of the second entry in the table.
+class CBitmap {
+private:
+	BITMAP_FILEHEADER m_BitmapFileHeader;
+	BITMAP_HEADER m_BitmapHeader;
+	RGBA *m_BitmapData;
+	unsigned int m_BitmapSize;
+	
+	// Masks and bit counts shouldn't exceed 32 Bits
+public:
+	class CColor {
+public:
+		static inline unsigned int BitCountByMask(unsigned int Mask) {
+			unsigned int BitCount = 0;
+			while (Mask) {
+				Mask &= Mask - 1;
+				BitCount++;
+			}
+			return BitCount;
+		}
 
-4       Bitmap has a maximum of 16 colors. Each pixel in the bitmap is
-represented by a 4-bit index into the color table. For example, if the first
-byte in the bitmap is 0x1F, the byte represents two pixels. The first pixel
-contains the color in the second table entry, and the second pixel contains
-the color in the sixteenth table entry.
+		static inline unsigned int BitPositionByMask(unsigned int Mask) {
+			return BitCountByMask((Mask & (~Mask + 1)) - 1);
+		}
 
-8       Bitmap has a maximum of 256 colors. Each pixel in the bitmap is
-represented by a 1-byte index into the color table. For example, if the first
-byte in the bitmap is 0x1F, the first pixel has the color of the
-thirty-second table entry.
+		static inline unsigned int ComponentByMask(unsigned int Color, unsigned int Mask) {
+			unsigned int Component = Color & Mask;
+			return Component >> BitPositionByMask(Mask);
+		}
 
-24      Bitmap has a maximum of 2^24 colors. The bmiColors (or bmciColors)
-member is NULL, and each 3-byte sequence in the bitmap array represents the
-relative intensities of red, green, and blue, respectively, for a pixel.
+		static inline unsigned int BitCountToMask(unsigned int BitCount) {
+			return (BitCount == 32) ? 0xFFFFFFFF : (1 << BitCount) - 1;
+		}
 
-The biClrUsed member of the BITMAPINFOHEADER structure specifies the number
-of color indexes in the color table actually used by the bitmap. If the
-biClrUsed member is set to zero, the bitmap uses the maximum number of colors
-corresponding to the value of the biBitCount member.  An alternative form of
-bitmap file uses the BITMAPCOREINFO, BITMAPCOREHEADER, and RGBTRIPLE
-structures.
+		static unsigned int Convert(unsigned int Color, unsigned int FromBitCount, unsigned int ToBitCount) {
+			if (ToBitCount < FromBitCount) {
+				Color >>= (FromBitCount - ToBitCount);
+			} else {
+				Color <<= (ToBitCount - FromBitCount);
+				if (Color > 0) {
+					Color |= BitCountToMask(ToBitCount - FromBitCount);
+				}
+			}
+			return Color;
+		}
+	};
 
-Bitmap Compression
+public:
+	
+	CBitmap() : m_BitmapData(0), m_BitmapSize(0)  {
+		Dispose();
+	}
+	
+	CBitmap(const char* Filename) : m_BitmapData(0), m_BitmapSize(0) {
+		Load(Filename);
+	}
+	
+	~CBitmap() {
+		Dispose();
+	}
+	
+	void Dispose() {
+		if (m_BitmapData) {
+			delete[] m_BitmapData;
+			m_BitmapData = 0;
+		}
+		memset(&m_BitmapFileHeader, 0, sizeof(m_BitmapFileHeader));
+		memset(&m_BitmapHeader, 0, sizeof(m_BitmapHeader));
+	}
+	
+	/* Load specified Bitmap and stores it as RGBA in an internal buffer */
+	
+	bool Load(const char *Filename) {
+		std::ifstream file(Filename, std::ios::binary | std::ios::in);
+		
+		if (file.bad()) {
+			return false;
+		}
 
-Windows versions 3.0 and later support run-length encoded (RLE) formats for
-compressing bitmaps that use 4 bits per pixel and 8 bits per pixel.
-Compression reduces the disk and memory storage required for a bitmap.
+		if (file.is_open() == false) {
+			return false;
+		}
+		
+		Dispose();
+		
+		file.read((char*) &m_BitmapFileHeader, BITMAP_FILEHEADER_SIZE);
+		if (m_BitmapFileHeader.Signature != BITMAP_SIGNATURE) {
+			return false;
+		}
 
-Compression of 8-Bits-per-Pixel Bitmaps
+		file.read((char*) &m_BitmapHeader, sizeof(BITMAP_HEADER));
+		
+		/* Load Color Table */
+		
+		file.seekg(BITMAP_FILEHEADER_SIZE + m_BitmapHeader.HeaderSize, std::ios::beg);
+		
+		unsigned int ColorTableSize = 0;
 
-When the biCompression member of the BITMAPINFOHEADER structure is set to
-BI_RLE8, the DIB is compressed using a run-length encoded format for a
-256-color bitmap. This format uses two modes: encoded mode and absolute mode.
-Both modes can occur anywhere throughout a single bitmap.
+		if (m_BitmapHeader.BitCount == 1) {
+			ColorTableSize = 2;
+		} else if (m_BitmapHeader.BitCount == 4) {
+			ColorTableSize = 16;
+		} else if (m_BitmapHeader.BitCount == 8) {
+			ColorTableSize = 256;
+		}
+		
+		// Always allocate full sized color table
 
-Encoded Mode
+		BGRA* ColorTable = new BGRA[ColorTableSize]; // std::bad_alloc exception should be thrown if memory is not available
+		
+		file.read((char*) ColorTable, sizeof(BGRA) * m_BitmapHeader.ClrUsed);
 
-A unit of information in encoded mode consists of two bytes. The first byte
-specifies the number of consecutive pixels to be drawn using the color index
-contained in the second byte.  The first byte of the pair can be set to zero
-to indicate an escape that denotes the end of a line, the end of the bitmap,
-or a delta. The interpretation of the escape depends on the value of the
-second byte of the pair, which must be in the range 0x00 through 0x02.
-Following are the meanings of the escape values that can be used in the
-second byte:
+		/* ... Color Table for 16 bits images are not supported yet */	
+		
+		m_BitmapSize = GetWidth() * GetHeight();
+		m_BitmapData = new RGBA[m_BitmapSize];
+		
+		unsigned int LineWidth = ((GetWidth() * GetBitCount() / 8) + 3) & ~3;
+		uint8_t *Line = new uint8_t[LineWidth];
+		
+		file.seekg(m_BitmapFileHeader.BitsOffset, std::ios::beg);
 
-Second byte     Meaning
+		int Index = 0;
+		bool Result = true;
 
-0       End of line. 
-1       End of bitmap. 
-2       Delta. The two bytes following the escape contain unsigned values
-indicating the horizontal and vertical offsets of the next pixel from the
-current position.
+		if (m_BitmapHeader.Compression == 0) {
+			for (unsigned int i = 0; i < GetHeight(); i++) {
+				file.read((char*) Line, LineWidth);
 
-Absolute Mode
+				uint8_t *LinePtr = Line;
+				
+				for (unsigned int j = 0; j < GetWidth(); j++) {
+					if (m_BitmapHeader.BitCount == 1) {
+						uint32_t Color = *((uint8_t*) LinePtr);
+						for (int k = 0; k < 8; k++) {
+							m_BitmapData[Index].Red = ColorTable[Color & 0x80 ? 1 : 0].Red;
+							m_BitmapData[Index].Green = ColorTable[Color & 0x80 ? 1 : 0].Green;
+							m_BitmapData[Index].Blue = ColorTable[Color & 0x80 ? 1 : 0].Blue;
+							m_BitmapData[Index].Alpha = ColorTable[Color & 0x80 ? 1 : 0].Alpha;
+							Index++;
+							Color <<= 1;
+						}
+						LinePtr++;
+						j += 7;
+					} else if (m_BitmapHeader.BitCount == 4) {
+						uint32_t Color = *((uint8_t*) LinePtr);
+						m_BitmapData[Index].Red = ColorTable[(Color >> 4) & 0x0f].Red;
+						m_BitmapData[Index].Green = ColorTable[(Color >> 4) & 0x0f].Green;
+						m_BitmapData[Index].Blue = ColorTable[(Color >> 4) & 0x0f].Blue;
+						m_BitmapData[Index].Alpha = ColorTable[(Color >> 4) & 0x0f].Alpha;
+						Index++;
+						m_BitmapData[Index].Red = ColorTable[Color & 0x0f].Red;
+						m_BitmapData[Index].Green = ColorTable[Color & 0x0f].Green;
+						m_BitmapData[Index].Blue = ColorTable[Color & 0x0f].Blue;
+						m_BitmapData[Index].Alpha = ColorTable[Color & 0x0f].Alpha;
+						Index++;
+						LinePtr++;
+						j++;
+					} else if (m_BitmapHeader.BitCount == 8) {
+						uint32_t Color = *((uint8_t*) LinePtr);
+						m_BitmapData[Index].Red = ColorTable[Color].Red;
+						m_BitmapData[Index].Green = ColorTable[Color].Green;
+						m_BitmapData[Index].Blue = ColorTable[Color].Blue;
+						m_BitmapData[Index].Alpha = ColorTable[Color].Alpha;
+						Index++;
+						LinePtr++;
+					} else if (m_BitmapHeader.BitCount == 16) {
+						uint32_t Color = *((uint16_t*) LinePtr);
+						m_BitmapData[Index].Red = ((Color >> 10) & 0x1f) << 3;
+						m_BitmapData[Index].Green = ((Color >> 5) & 0x1f) << 3;
+						m_BitmapData[Index].Blue = (Color & 0x1f) << 3;
+						m_BitmapData[Index].Alpha = 255;
+						Index++;
+						LinePtr += 2;
+					} else if (m_BitmapHeader.BitCount == 24) {
+						uint32_t Color = *((uint32_t*) LinePtr);
+						m_BitmapData[Index].Blue = Color & 0xff;
+						m_BitmapData[Index].Green = (Color >> 8) & 0xff;
+						m_BitmapData[Index].Red = (Color >> 16) & 0xff;
+						m_BitmapData[Index].Alpha = 255;
+						Index++;
+						LinePtr += 3;
+					} else if (m_BitmapHeader.BitCount == 32) {
+						uint32_t Color = *((uint32_t*) LinePtr);
+						m_BitmapData[Index].Blue = Color & 0xff;
+						m_BitmapData[Index].Green = (Color >> 8) & 0xff;
+						m_BitmapData[Index].Red = (Color >> 16) & 0xff;
+						m_BitmapData[Index].Alpha = Color >> 24;
+						Index++;
+						LinePtr += 4;
+					}
+				}
+			}
+		} else if (m_BitmapHeader.Compression == 1) { // RLE 8
+			uint8_t Count = 0;
+			uint8_t ColorIndex = 0;
+			int x = 0, y = 0;
 
-Absolute mode is signaled by the first byte in the pair being set to zero and
-the second byte to a value between 0x03 and 0xFF. The second byte represents
-the number of bytes that follow, each of which contains the color index of a
-single pixel. Each run must be aligned on a word boundary.  Following is an
-example of an 8-bit RLE bitmap (the two-digit hexadecimal values in the
-second column represent a color index for a single pixel):
+			while (file.eof() == false) {
+				file.read((char*) &Count, sizeof(uint8_t));
+				file.read((char*) &ColorIndex, sizeof(uint8_t));
 
-Compressed data         Expanded data
+				if (Count > 0) {
+					Index = x + y * GetWidth();
+					for (int k = 0; k < Count; k++) {
+						m_BitmapData[Index + k].Red = ColorTable[ColorIndex].Red;
+						m_BitmapData[Index + k].Green = ColorTable[ColorIndex].Green;
+						m_BitmapData[Index + k].Blue = ColorTable[ColorIndex].Blue;
+						m_BitmapData[Index + k].Alpha = ColorTable[ColorIndex].Alpha;
+					}
+					x += Count;
+				} else if (Count == 0) {
+					int Flag = ColorIndex;
+					if (Flag == 0) {
+						x = 0;
+						y++;
+					} else if (Flag == 1) {
+						break;
+					} else if (Flag == 2) {
+						char rx = 0;
+						char ry = 0;
+						file.read((char*) &rx, sizeof(char));
+						file.read((char*) &ry, sizeof(char));
+						x += rx;
+						y += ry;
+					} else {
+						Count = Flag;
+						Index = x + y * GetWidth();
+						for (int k = 0; k < Count; k++) {
+							file.read((char*) &ColorIndex, sizeof(uint8_t));
+							m_BitmapData[Index + k].Red = ColorTable[ColorIndex].Red;
+							m_BitmapData[Index + k].Green = ColorTable[ColorIndex].Green;
+							m_BitmapData[Index + k].Blue = ColorTable[ColorIndex].Blue;
+							m_BitmapData[Index + k].Alpha = ColorTable[ColorIndex].Alpha;
+						}
+						x += Count;
+						// Attention: Current Microsoft STL implementation seems to be buggy, tellg() always returns 0.
+						if (file.tellg() & 1) {
+							file.seekg(1, std::ios::cur);
+						}
+					}
+				}
+			}
+		} else if (m_BitmapHeader.Compression == 2) { // RLE 4
+			/* RLE 4 is not supported */
+			Result = false;
+		} else if (m_BitmapHeader.Compression == 3) { // BITFIELDS
+			
+			/* We assumes that mask of each color component can be in any order */
 
-03 04                   04 04 04 
-05 06                   06 06 06 06 06 
-00 03 45 56 67 00       45 56 67 
-02 78                   78 78 
-00 02 05 01             Move 5 right and 1 down 
-02 78                   78 78 
-00 00                   End of line 
-09 1E                   1E 1E 1E 1E 1E 1E 1E 1E 1E 
-00 01                   End of RLE bitmap 
+			uint32_t BitCountRed = CColor::BitCountByMask(m_BitmapHeader.RedMask);
+			uint32_t BitCountGreen = CColor::BitCountByMask(m_BitmapHeader.GreenMask);
+			uint32_t BitCountBlue = CColor::BitCountByMask(m_BitmapHeader.BlueMask);
+			uint32_t BitCountAlpha = CColor::BitCountByMask(m_BitmapHeader.AlphaMask);
 
-Compression of 4-Bits-per-Pixel Bitmaps
+			for (unsigned int i = 0; i < GetHeight(); i++) {
+				file.read((char*) Line, LineWidth);
+				
+				uint8_t *LinePtr = Line;
+				
+				for (unsigned int j = 0; j < GetWidth(); j++) {
+					
+					uint32_t Color = 0;
 
-When the biCompression member of the BITMAPINFOHEADER structure is set to
-BI_RLE4, the DIB is compressed using a run-length encoded format for a
-16-color bitmap. This format uses two modes: encoded mode and absolute mode.
+					if (m_BitmapHeader.BitCount == 16) {
+						Color = *((uint16_t*) LinePtr);
+						LinePtr += 2;
+					} else if (m_BitmapHeader.BitCount == 32) {
+						Color = *((uint32_t*) LinePtr);
+						LinePtr += 4;
+					} else {
+						// Other formats are not valid
+					}
+					m_BitmapData[Index].Red = CColor::Convert(CColor::ComponentByMask(Color, m_BitmapHeader.RedMask), BitCountRed, 8);
+					m_BitmapData[Index].Green = CColor::Convert(CColor::ComponentByMask(Color, m_BitmapHeader.GreenMask), BitCountGreen, 8);
+					m_BitmapData[Index].Blue = CColor::Convert(CColor::ComponentByMask(Color, m_BitmapHeader.BlueMask), BitCountBlue, 8);
+					m_BitmapData[Index].Alpha = CColor::Convert(CColor::ComponentByMask(Color, m_BitmapHeader.AlphaMask), BitCountAlpha, 8);
 
-Encoded Mode
+					Index++;
+				}
+			}
+		}
+		
+		delete [] ColorTable;
+		delete [] Line;
 
-A unit of information in encoded mode consists of two bytes. The first byte
-of the pair contains the number of pixels to be drawn using the color indexes
-in the second byte.
+		file.close();
+		return Result;
+	}
+	
+	bool Save(const char* Filename, unsigned int BitCount = 32) {
+		bool Result = true;
 
-The second byte contains two color indexes, one in its high-order nibble
-(that is, its low-order 4 bits) and one in its low-order nibble.
+		std::ofstream file(Filename, std::ios::out | std::ios::binary);
 
-The first pixel is drawn using the color specified by the high-order nibble,
-the second is drawn using the color in the low-order nibble, the third is
-drawn with the color in the high-order nibble, and so on, until all the
-pixels specified by the first byte have been drawn.
+		if (file.is_open() == false) {
+			return false;
+		}
+		
+		BITMAP_FILEHEADER bfh;
+		BITMAP_HEADER bh;
+		memset(&bfh, 0, sizeof(bfh));
+		memset(&bh, 0, sizeof(bh));
 
-The first byte of the pair can be set to zero to indicate an escape that
-denotes the end of a line, the end of the bitmap, or a delta. The
-interpretation of the escape depends on the value of the second byte of the
-pair. In encoded mode, the second byte has a value in the range 0x00 through
-0x02. The meaning of these values is the same as for a DIB with 8 bits per
-pixel.
+		bfh.Signature = BITMAP_SIGNATURE;
+		bfh.BitsOffset = BITMAP_FILEHEADER_SIZE + sizeof(BITMAP_HEADER);
+		bfh.Size = (GetWidth() * GetHeight() * BitCount) / 8 + bfh.BitsOffset;
+	
+		bh.HeaderSize = sizeof(BITMAP_HEADER);
+		bh.BitCount = BitCount;
+		
+		if (BitCount == 32) {
+			bh.Compression = 3; // BITFIELD
+			bh.AlphaMask = 0xff000000;
+			bh.BlueMask = 0x00ff0000;
+			bh.GreenMask = 0x0000ff00;
+			bh.RedMask = 0x000000ff;
+		} else if (BitCount == 16) {
+			bh.Compression = 3; // BITFIELD
+			bh.AlphaMask = 0x00000000;
+			bh.BlueMask = 0x0000001f;
+			bh.GreenMask = 0x000007E0;
+			bh.RedMask = 0x0000F800;
+		} else {
+			bh.Compression = 0; // RGB
+		}
+		
+		unsigned int LineWidth = (GetWidth() + 3) & ~3;
 
-Absolute Mode
+		bh.Planes = 1;
+		bh.Height = GetHeight();
+		bh.Width = GetWidth();
+		bh.SizeImage = (LineWidth * BitCount * GetHeight()) / 8;
+		bh.PelsPerMeterX = 3780;
+		bh.PelsPerMeterY = 3780;
+		
+		if (BitCount == 32) {
+			file.write((char*) &bfh, sizeof(BITMAP_FILEHEADER));
+			file.write((char*) &bh, sizeof(BITMAP_HEADER));
+			file.write((char*) m_BitmapData, bh.SizeImage);
+		} else if (BitCount < 16) {
+			uint8_t* Bitmap = new uint8_t[bh.SizeImage];
+			
+			BGRA *Palette = 0;
+			unsigned int PaletteSize = 0;
 
-In absolute mode, the first byte contains zero, the second byte contains the
-number of color indexes that follow, and subsequent bytes contain color
-indexes in their high- and low-order nibbles, one color index for each pixel.
-Each run must be aligned on a word boundary.
+			if (GetBitsWithPalette(Bitmap, bh.SizeImage, BitCount, Palette, PaletteSize)) {
+				bfh.BitsOffset += PaletteSize * sizeof(BGRA);
 
-Following is an example of a 4-bit RLE bitmap (the one-digit hexadecimal
-values in the second column represent a color index for a single pixel):
+				file.write((char*) &bfh, BITMAP_FILEHEADER_SIZE);
+				file.write((char*) &bh, sizeof(BITMAP_HEADER));
+				file.write((char*) Palette, PaletteSize * sizeof(BGRA));
+				file.write((char*) Bitmap, bh.SizeImage);
+			}
+			delete [] Bitmap;
+			delete [] Palette;
+		} else {
+			uint32_t RedMask = 0;
+			uint32_t GreenMask = 0;
+			uint32_t BlueMask = 0;
+			uint32_t AlphaMask = 0;
 
-Compressed data         Expanded data
+			if (BitCount == 16) {
+				RedMask = 0x0000F800;
+				GreenMask = 0x000007E0;
+				BlueMask = 0x0000001F;
+				AlphaMask = 0x00000000;
+			} else if (BitCount == 24) {
+				RedMask = 0x00FF0000;
+				GreenMask = 0x0000FF00;
+				BlueMask = 0x000000FF;
+			} else {
+				// Other color formats are not valid
+				Result = false;
+			}
 
-03 04                   0 4 0
-05 06                   0 6 0 6 0 
-00 06 45 56 67 00       4 5 5 6 6 7 
-04 78                   7 8 7 8 
-00 02 05 01             Move 5 right and 1 down 
-04 78                   7 8 7 8 
-00 00                   End of line 
-09 1E                   1 E 1 E 1 E 1 E 1 
-00 01                   End of RLE bitmap 
+			if (Result) {
+				if (GetBits(NULL, bh.SizeImage, RedMask, GreenMask, BlueMask, AlphaMask)) {
+					uint8_t* Bitmap = new uint8_t[bh.SizeImage];
+					if (GetBits(Bitmap, bh.SizeImage, RedMask, GreenMask, BlueMask, AlphaMask)) {
+						file.write((char*) &bfh, sizeof(BITMAP_FILEHEADER));
+						file.write((char*) &bh, sizeof(BITMAP_HEADER));
+						file.write((char*) Bitmap, bh.SizeImage);
+					}
+					delete [] Bitmap;
+				}
+			}
+		}
 
-Bitmap Example
+		file.close();
+		return Result;
+	}
 
-The following example is a text dump of a 16-color bitmap (4 bits per pixel):
+	unsigned int GetWidth() {
+		/* Add plausibility test */
+		// if (abs(m_BitmapHeader.Width) > 8192) {
+		//	m_BitmapHeader.Width = 8192;
+		// }
+		return m_BitmapHeader.Width < 0 ? -m_BitmapHeader.Width : m_BitmapHeader.Width;
+	}
+	
+	unsigned int GetHeight() {
+		/* Add plausibility test */
+		// if (abs(m_BitmapHeader.Height) > 8192) {
+		//	m_BitmapHeader.Height = 8192;
+		// }
+		return m_BitmapHeader.Height < 0 ? -m_BitmapHeader.Height : m_BitmapHeader.Height;
+	}
+	
+	unsigned int GetBitCount() {
+		/* Add plausibility test */
+		// if (m_BitmapHeader.BitCount > 32) {
+		//	m_BitmapHeader.BitCount = 32;
+		// }
+		return m_BitmapHeader.BitCount;
+	}
+	
+	/* Copies internal RGBA buffer to user specified buffer */
+	
+	bool GetBits(void* Buffer, unsigned int &Size) {
+		bool Result = false;
+		if (Size == 0 || Buffer == 0) {
+			Size = m_BitmapSize * sizeof(RGBA);
+			Result = m_BitmapSize != 0;
+		} else {
+			memcpy(Buffer, m_BitmapData, Size);
+			Result = true;
+		}
+		return Result;
+	}
 
-Win3DIBFile
-              BitmapFileHeader
-                  Type       19778
-                  Size       3118
-                  Reserved1  0
-                  Reserved2  0
-                  OffsetBits 118
-              BitmapInfoHeader
-                  Size            40
-                  Width           80
-                  Height          75
-                  Planes          1
-                  BitCount        4
-                  Compression     0
-                  SizeImage       3000
+	/* Returns internal RGBA buffer */
+	
+	void* GetBits() {
+		return m_BitmapData;
+	}
+	
+	/* Copies internal RGBA buffer to user specified buffer and converts it into destination
+	 * bit format specified by component masks.
+	 *
+	 * Typical Bitmap color formats (BGR/BGRA):
+	 *
+	 * Masks for 16 bit (5-5-5): ALPHA = 0x00000000, RED = 0x00007C00, GREEN = 0x000003E0, BLUE = 0x0000001F
+	 * Masks for 16 bit (5-6-5): ALPHA = 0x00000000, RED = 0x0000F800, GREEN = 0x000007E0, BLUE = 0x0000001F
+	 * Masks for 24 bit: ALPHA = 0x00000000, RED = 0x00FF0000, GREEN = 0x0000FF00, BLUE = 0x000000FF
+	 * Masks for 32 bit: ALPHA = 0xFF000000, RED = 0x00FF0000, GREEN = 0x0000FF00, BLUE = 0x000000FF
+	 *
+	 * Other color formats (RGB/RGBA):
+	 *
+	 * Masks for 32 bit (RGBA): ALPHA = 0xFF000000, RED = 0x000000FF, GREEN = 0x0000FF00, BLUE = 0x00FF0000
+	 *
+	 * Bit count will be rounded to next 8 bit boundary. If IncludePadding is true, it will be ensured
+	 * that line width is a multiple of 4. padding bytes are included if necessary.
+	 *
+	 * NOTE: systems with big endian byte order may require masks in inversion order.
+	 */
 
-                  XPelsPerMeter   0
-                  YPelsPerMeter   0
-                  ColorsUsed      16
-                  ColorsImportant 16
-              Win3ColorTable
-                  Blue  Green  Red  Unused
-[00000000]        84    252    84   0
-[00000001]        252   252    84   0
-[00000002]        84    84     252  0
-[00000003]        252   84     252  0
-[00000004]        84    252    252  0
-[00000005]        252   252    252  0
-[00000006]        0     0      0    0
-[00000007]        168   0      0    0
-[00000008]        0     168    0    0
-[00000009]        168   168    0    0
-[0000000A]        0     0      168  0
-[0000000B]        168   0      168  0
-[0000000C]        0     168    168  0
-[0000000D]        168   168    168  0
-[0000000E]        84    84     84   0
-[0000000F]        252   84     84   0
-              Image
-    .
-    .                                           Bitmap data
-    .
+	bool GetBits(void* Buffer, unsigned int &Size, unsigned int RedMask, unsigned int GreenMask, unsigned int BlueMask, unsigned int AlphaMask, bool IncludePadding = true) {
+		bool Result = false;
 
-Icon-Resource File Format
+		uint32_t BitCountRed = CColor::BitCountByMask(RedMask);
+		uint32_t BitCountGreen = CColor::BitCountByMask(GreenMask);
+		uint32_t BitCountBlue = CColor::BitCountByMask(BlueMask);
+		uint32_t BitCountAlpha = CColor::BitCountByMask(AlphaMask);
+		
+		unsigned int BitCount = (BitCountRed + BitCountGreen + BitCountBlue + BitCountAlpha + 7) & ~7;
 
-An icon-resource file contains image data for icons used by Windows
-applications. The file consists of an icon directory identifying the number
-and types of icon images in the file, plus one or more icon images. The
-default filename extension for an icon-resource file is .ICO.
+		if (BitCount > 32) {
+			return false;
+		}
+		
+		unsigned int w = GetWidth();
+		//unsigned int LineWidth = (w + 3) & ~3;
+		unsigned int dataBytesPerLine = (w * BitCount + 7) / 8;
+		unsigned int LineWidth = (dataBytesPerLine + 3) & ~3;
 
-Icon Directory
+		if (Size == 0 || Buffer == 0) {
+			//Size = (LineWidth * GetHeight() * BitCount) / 8 + sizeof(unsigned int);
+			Size = (GetWidth() * GetHeight() * BitCount) / 8 + sizeof(unsigned int);
+			return true;
+		}
 
-Each icon-resource file starts with an icon directory. The icon directory,
-defined as an ICONDIR structure, specifies the number of icons in the
-resource and the dimensions and color format of each icon image. The ICONDIR
-structure has the following form:
+		uint8_t* BufferPtr = (uint8_t*) Buffer;
+		
+		Result = true;
 
+		uint32_t BitPosRed = CColor::BitPositionByMask(RedMask);
+		uint32_t BitPosGreen = CColor::BitPositionByMask(GreenMask);
+		uint32_t BitPosBlue = CColor::BitPositionByMask(BlueMask);
+		uint32_t BitPosAlpha = CColor::BitPositionByMask(AlphaMask);
+		
+		unsigned int j = 0;
 
+		for (unsigned int i = 0; i < m_BitmapSize; i++) {
+			*(uint32_t*) BufferPtr =
+			(CColor::Convert(m_BitmapData[i].Blue, 8, BitCountBlue) << BitPosBlue) |
+			(CColor::Convert(m_BitmapData[i].Green, 8, BitCountGreen) << BitPosGreen) | 
+			(CColor::Convert(m_BitmapData[i].Red, 8, BitCountRed) << BitPosRed) | 
+			(CColor::Convert(m_BitmapData[i].Alpha, 8, BitCountAlpha) << BitPosAlpha);
+			
+			if (IncludePadding) {
+				j++;
+				if (j >= w) {
+					for (unsigned int k = 0; k < LineWidth - dataBytesPerLine; k++) {
+						BufferPtr += (BitCount >> 3);
+					}
+					j = 0;
+				}
+			}
 
-typedef struct ICONDIR {
-    WORD          idReserved;
-    WORD          idType;
-    WORD          idCount;
-    ICONDIRENTRY  idEntries[1];
-} ICONHEADER;
+			BufferPtr += (BitCount >> 3);
+		}
+		
+		Size -= sizeof(unsigned int);
 
-Following are the members in the ICONDIR structure:
+		return Result;
+	}
+	
+	/* See GetBits(). 
+	 * It creates a corresponding color table (palette) which have to be destroyed by the user after usage.
+	 *
+	 * Supported Bit depths are: 4, 8
+	 *
+	 * Todo: Optimize, use optimized palette, do ditehring (see my dithering class), support padding for 4 bit bitmaps
+	 */
 
-idReserved      Reserved; must be zero. 
-idType          Specifies the resource type. This member is set to 1. 
-idCount         Specifies the number of entries in the directory. 
-idEntries       Specifies an array of ICONDIRENTRY structures containing
-information about individual icons. The idCount member specifies the number
-of structures in the array.
+	bool GetBitsWithPalette(void* Buffer, unsigned int &Size, unsigned int BitCount, BGRA* &Palette, unsigned int &PaletteSize, bool OptimalPalette = false, bool IncludePadding = true) {
+		bool Result = false;
 
-The ICONDIRENTRY structure specifies the dimensions and color format for an
-icon. The structure has the following form:
+		if (BitCount > 16) {
+			return false;
+		}
+		
+		unsigned int w = GetWidth();
+		unsigned int dataBytesPerLine = (w * BitCount + 7) / 8;
+		unsigned int LineWidth = (dataBytesPerLine + 3) & ~3;
 
+		if (Size == 0 || Buffer == 0) {
+			Size = (LineWidth * GetHeight() * BitCount) / 8;
+			return true;
+		}
+		
 
+		if (OptimalPalette) {
+			PaletteSize = 0;
+			// Not implemented
+		} else {
+			if (BitCount == 1) {
+				PaletteSize = 2;
+				// Not implemented: Who need that?
+			} else if (BitCount == 4) { // 2:2:1
+				PaletteSize = 16;
+				Palette = new BGRA[PaletteSize];
+				for (int r = 0; r < 4; r++) {
+					for (int g = 0; g < 2; g++) {
+						for (int b = 0; b < 2; b++) {
+							Palette[r | g << 2 | b << 3].Red = r ? (r << 6) | 0x3f : 0;
+							Palette[r | g << 2 | b << 3].Green = g ? (g << 7) | 0x7f : 0;
+							Palette[r | g << 2 | b << 3].Blue = b ? (b << 7) | 0x7f : 0;
+							Palette[r | g << 2 | b << 3].Alpha = 0xff;
+						}
+					}
+				}
+			} else if (BitCount == 8) { // 3:3:2
+				PaletteSize = 256;
+				Palette = new BGRA[PaletteSize];
+				for (int r = 0; r < 8; r++) {
+					for (int g = 0; g < 8; g++) {
+						for (int b = 0; b < 4; b++) {
+							Palette[r | g << 3 | b << 6].Red = r ? (r << 5) | 0x1f : 0;
+							Palette[r | g << 3 | b << 6].Green = g ? (g << 5) | 0x1f : 0;
+							Palette[r | g << 3 | b << 6].Blue = b ? (b << 6) | 0x3f : 0;
+							Palette[r | g << 3 | b << 6].Alpha = 0xff;
+						}
+					}
+				}
+			} else if (BitCount == 16) { // 5:5:5
+				// Not implemented
+			}
+		}
 
-struct IconDirectoryEntry {
-    BYTE  bWidth;
-    BYTE  bHeight;
-    BYTE  bColorCount;
-    BYTE  bReserved;
-    WORD  wPlanes;
-    WORD  wBitCount;
-    DWORD dwBytesInRes;
-    DWORD dwImageOffset;
+		unsigned int j = 0;
+		uint8_t* BufferPtr = (uint8_t*) Buffer;
+		
+		for (unsigned int i = 0; i < m_BitmapSize; i++) {
+			if (BitCount == 1) {
+				// Not implemented: Who needs that?
+			} else if (BitCount == 4) {
+				*BufferPtr = ((m_BitmapData[i].Red >> 6) | (m_BitmapData[i].Green >> 7) << 2 | (m_BitmapData[i].Blue >> 7) << 3) << 4;
+				i++;
+				*BufferPtr |= (m_BitmapData[i].Red >> 6) | (m_BitmapData[i].Green >> 7) << 2 | (m_BitmapData[i].Blue >> 7) << 3;
+			} else if (BitCount == 8) {
+				*BufferPtr = (m_BitmapData[i].Red >> 5) | (m_BitmapData[i].Green >> 5) << 3 | (m_BitmapData[i].Blue >> 5) << 6;
+			} else if (BitCount == 16) {
+				// Not implemented
+			}
+
+			if (IncludePadding) {
+				j++;
+				if (j >= w) {
+					for (unsigned int k = 0; k < (LineWidth - dataBytesPerLine); k++) {
+						BufferPtr += BitCount / 8;
+					}
+					j = 0;
+				}
+			}
+
+			BufferPtr++;
+		}
+		
+		Result = true;
+
+		return Result;
+	}
+
+	/* Set Bitmap Bits. Will be converted to RGBA internally */
+
+	bool SetBits(void* Buffer, unsigned int Width, unsigned int Height, unsigned int RedMask, unsigned int GreenMask, unsigned int BlueMask, unsigned int AlphaMask = 0) {
+		if (Buffer == 0) {
+			return false;
+		}
+
+		uint8_t *BufferPtr = (uint8_t*) Buffer;
+		
+		Dispose();
+
+		m_BitmapHeader.Width = Width;
+		m_BitmapHeader.Height = Height;
+		m_BitmapHeader.BitCount = 32;
+		m_BitmapHeader.Compression = 3; 
+
+		m_BitmapSize = GetWidth() * GetHeight();
+		m_BitmapData = new RGBA[m_BitmapSize];
+		
+		/* Find bit count by masks (rounded to next 8 bit boundary) */
+		
+		unsigned int BitCount = (CColor::BitCountByMask(RedMask | GreenMask | BlueMask | AlphaMask) + 7) & ~7;
+		
+		uint32_t BitCountRed = CColor::BitCountByMask(RedMask);
+		uint32_t BitCountGreen = CColor::BitCountByMask(GreenMask);
+		uint32_t BitCountBlue = CColor::BitCountByMask(BlueMask);
+		uint32_t BitCountAlpha = CColor::BitCountByMask(AlphaMask);
+
+		for (unsigned int i = 0; i < m_BitmapSize; i++) {
+			unsigned int Color = 0;
+			if (BitCount <= 8) {
+				Color = *((uint8_t*) BufferPtr);
+				BufferPtr += 1;
+			} else if (BitCount <= 16) {
+				Color = *((uint16_t*) BufferPtr);
+				BufferPtr += 2;
+			} else if (BitCount <= 24) {
+				Color = *((uint32_t*) BufferPtr);
+				BufferPtr += 3;
+			} else if (BitCount <= 32) {
+				Color = *((uint32_t*) BufferPtr);
+				BufferPtr += 4;
+			} else {
+				/* unsupported */
+				BufferPtr += 1;
+			}
+			m_BitmapData[i].Alpha = CColor::Convert(CColor::ComponentByMask(Color, AlphaMask), BitCountAlpha, 8);
+			m_BitmapData[i].Red = CColor::Convert(CColor::ComponentByMask(Color, RedMask), BitCountRed, 8);
+			m_BitmapData[i].Green = CColor::Convert(CColor::ComponentByMask(Color, GreenMask), BitCountGreen, 8);
+			m_BitmapData[i].Blue = CColor::Convert(CColor::ComponentByMask(Color, BlueMask), BitCountBlue, 8);
+		}
+
+		return true;
+	}
 };
 
-Following are the members in the ICONDIRENTRY structure: 
-
-bWidth          Specifies the width of the icon, in pixels. Acceptable values
-are 16, 32, and 64.
-
-bHeight         Specifies the height of the icon, in pixels. Acceptable
-values are 16, 32, and 64.
-
-bColorCount     Specifies the number of colors in the icon. Acceptable values
-are 2, 8, and 16.
-
-bReserved       Reserved; must be zero. 
-wPlanes         Specifies the number of color planes in the icon bitmap. 
-wBitCount       Specifies the number of bits in the icon bitmap. 
-dwBytesInRes    Specifies the size of the resource, in bytes. 
-dwImageOffset   Specifies the offset, in bytes, from the beginning of the
-file to the icon image.
-
-Icon Image
-
-Each icon-resource file contains one icon image for each image identified in
-the icon directory. An icon image consists of an icon-image header, a color
-table, an XOR mask, and an AND mask. The icon image has the following form:
-
-
-
-BITMAPINFOHEADER    icHeader;
-RGBQUAD             icColors[];
-BYTE                icXOR[];
-BYTE                icAND[];
-
-The icon-image header, defined as a BITMAPINFOHEADER structure, specifies the
-dimensions and color format of the icon bitmap. Only the biSize through
-biBitCount members and the biSizeImage member are used. All other members
-(such as biCompression and biClrImportant) must be set to zero.
-
-The color table, defined as an array of RGBQUAD structures, specifies the
-colors used in the XOR mask. As with the color table in a bitmap file, the
-biBitCount member in the icon-image header determines the number of elements
-in the array. For more information about the color table, see Section 1.1,
-"Bitmap-File Formats."
-
-The XOR mask, immediately following the color table, is an array of BYTE
-values representing consecutive rows of a bitmap. The bitmap defines the
-basic shape and color of the icon image. As with the bitmap bits in a bitmap
-file, the bitmap data in an icon-resource file is organized in scan lines,
-with each byte representing one or more pixels, as defined by the color
-format. For more information about these bitmap bits, see Section 1.1,
-"Bitmap-File Formats."
-
-The AND mask, immediately following the XOR mask, is an array of BYTE values,
-representing a monochrome bitmap with the same width and height as the XOR
-mask. The array is organized in scan lines, with each byte representing 8
-pixels.
-
-When Windows draws an icon, it uses the AND and XOR masks to combine the icon
-image with the pixels already on the display surface. Windows first applies
-the AND mask by using a bitwise AND operation; this preserves or removes
-existing pixel color.  Windows then applies the XOR mask by using a bitwise
-XOR operation. This sets the final color for each pixel.
-
-The following illustration shows the XOR and AND masks that create a
-monochrome icon (measuring 8 pixels by 8 pixels) in the form of an uppercase
-K:
-
-Windows Icon Selection
-
-Windows detects the resolution of the current display and matches it against
-the width and height specified for each version of the icon image. If Windows
-determines that there is an exact match between an icon image and the current
-device, it uses the matching image. Otherwise, it selects the closest match
-and stretches the image to the proper size.
-
-If an icon-resource file contains more than one image for a particular
-resolution, Windows uses the icon image that most closely matches the color
-capabilities of the current display. If no image matches the device
-capabilities exactly, Windows selects the image that has the greatest number
-of colors without exceeding the number of display colors. If all images
-exceed the color capabilities of the current display, Windows uses the icon
-image with the least number of colors.
-
-
-
-Cursor-Resource File Format
-
-A cursor-resource file contains image data for cursors used by Windows
-applications. The file consists of a cursor directory identifying the number
-and types of cursor images in the file, plus one or more cursor images. The
-default filename extension for a cursor-resource file is .CUR.
-
-Cursor Directory
-
-Each cursor-resource file starts with a cursor directory. The cursor
-directory, defined as a CURSORDIR structure, specifies the number of cursors
-in the file and the dimensions and color format of each cursor image. The
-CURSORDIR structure has the following form:
-
-
-typedef struct _CURSORDIR {
-    WORD           cdReserved;
-    WORD           cdType;
-    WORD           cdCount;
-    CURSORDIRENTRY cdEntries[];
-} CURSORDIR;
-
-Following are the members in the CURSORDIR structure: 
-
-cdReserved      Reserved; must be zero. 
-cdType          Specifies the resource type. This member must be set to 2. 
-cdCount         Specifies the number of cursors in the file. 
-cdEntries       Specifies an array of CURSORDIRENTRY structures containing
-information about individual cursors. The cdCount member specifies the number
-of structures in the array.
-
-A CURSORDIRENTRY structure specifies the dimensions and color format of a
-cursor image. The structure has the following form:
-
-
-
-typedef struct _CURSORDIRENTRY {
-    BYTE  bWidth;
-    BYTE  bHeight;
-    BYTE  bColorCount;
-    BYTE  bReserved;
-    WORD  wXHotspot;
-    WORD  wYHotspot;
-    DWORD lBytesInRes;
-    DWORD dwImageOffset;
-} CURSORDIRENTRY;
-
-Following are the members in the CURSORDIRENTRY structure: 
-
-bWidth          Specifies the width of the cursor, in pixels. 
-bHeight         Specifies the height of the cursor, in pixels. 
-bColorCount     Reserved; must be zero. 
-bReserved       Reserved; must be zero.
-wXHotspot       Specifies the x-coordinate, in pixels, of the hot spot. 
-wYHotspot       Specifies the y-coordinate, in pixels, of the hot spot. 
-lBytesInRes     Specifies the size of the resource, in bytes. 
-dwImageOffset   Specifies the offset, in bytes, from the start of the file to
-the cursor image.
-
-Cursor Image
-
-Each cursor-resource file contains one cursor image for each image identified
-in the cursor directory. A cursor image consists of a cursor-image header, a
-color table, an XOR mask, and an AND mask. The cursor image has the following
-form:
-
-
-
-BITMAPINFOHEADER    crHeader;
-RGBQUAD             crColors[];
-BYTE                crXOR[];
-BYTE                crAND[];
-
-The cursor hot spot is a single pixel in the cursor bitmap that Windows uses
-to track the cursor. The crXHotspot and crYHotspot members specify the x- and
-y-coordinates of the cursor hot spot. These coordinates are 16-bit integers.
-
-The cursor-image header, defined as a BITMAPINFOHEADER structure, specifies
-the dimensions and color format of the cursor bitmap. Only the biSize through
-biBitCount members and the biSizeImage member are used. The biHeight member
-specifies the combined height of the XOR and AND masks for the cursor. This
-value is twice the height of the XOR mask. The biPlanes and biBitCount
-members must be 1. All other members (such as biCompression and
-biClrImportant) must be set to zero.
-
-The color table, defined as an array of RGBQUAD structures, specifies the
-colors used in the XOR mask. For a cursor image, the table contains exactly
-two structures, since the biBitCount member in the cursor-image header is
-always 1.
-
-The XOR mask, immediately following the color table, is an array of BYTE
-values representing consecutive rows of a bitmap. The bitmap defines the
-basic shape and color of the cursor image. As with the bitmap bits in a
-bitmap file, the bitmap data in a cursor-resource file is organized in scan
-lines, with each byte representing one or more pixels, as defined by the
-color format. For more information about these bitmap bits, see Section 1.1,
-"Bitmap-File Formats."
-
-The AND mask, immediately following the XOR mask, is an array of BYTE values
-representing a monochrome bitmap with the same width and height as the XOR
-mask. The array is organized in scan lines, with each byte representing 8
-pixels.
-
-When Windows draws a cursor, it uses the AND and XOR masks to combine the
-cursor image with the pixels already on the display surface. Windows first
-applies the AND mask by using a bitwise AND operation; this preserves or
-removes existing pixel color.  Window then applies the XOR mask by using a
-bitwise XOR operation. This sets the final color for each pixel.
-
-The following illustration shows the XOR and the AND masks that create a
-cursor (measuring 8 pixels by 8 pixels) in the form of an arrow:
-
-Following are the bit-mask values necessary to produce black, white,
-inverted, and transparent results:
-
-Pixel result    AND maskXOR mask
-
-Black           0               0 
-White           0               1 
-Transparent     1               0 
-Inverted1               1 
-
-Windows Cursor Selection
-
-If a cursor-resource file contains more than one cursor image, Windows
-determines the best match for a particular display by examining the width and
-height of the cursor images.
-
-
-==============================================================================
-
-
-BITMAPFILEHEADER (3.0)
-
-
-
-typedef struct tagBITMAPFILEHEADER {    /* bmfh */
-    UINT    bfType;
-    DWORD   bfSize;
-    UINT    bfReserved1;
-    UINT    bfReserved2;
-    DWORD   bfOffBits;
-} BITMAPFILEHEADER;
-
-The BITMAPFILEHEADER structure contains information about the type, size, and
-layout of a device-independent bitmap (DIB) file.
-
-Member          Description
-
-bfType          Specifies the type of file. This member must be BM. 
-bfSize          Specifies the size of the file, in bytes. 
-bfReserved1     Reserved; must be set to zero. 
-bfReserved2     Reserved; must be set to zero.
-bfOffBits       Specifies the byte offset from the BITMAPFILEHEADER structure
-to the actual bitmap data in the file.
-
-Comments
-
-A BITMAPINFO or BITMAPCOREINFO structure immediately follows the
-BITMAPFILEHEADER structure in the DIB file.
-
-See Also
-
-BITMAPCOREINFO, BITMAPINFO 
-
-
-==============================================================================
-BITMAPINFO (3.0)
-
-
-
-typedef struct tagBITMAPINFO {  /* bmi */
-    BITMAPINFOHEADER    bmiHeader;
-    RGBQUAD             bmiColors[1];
-} BITMAPINFO;
-
-The BITMAPINFO structure fully defines the dimensions and color information
-for a Windows 3.0 or later device-independent bitmap (DIB).
-
-Member          Description
-
-bmiHeader       Specifies a BITMAPINFOHEADER structure that contains
-information about the dimensions and color format of a DIB.
-
-bmiColors       Specifies an array of RGBQUAD structures that define the
-colors in the bitmap.
-
-Comments
-
-A Windows 3.0 or later DIB consists of two distinct parts: a BITMAPINFO
-structure, which describes the dimensions and colors of the bitmap, and an
-array of bytes defining the pixels of the bitmap. The bits in the array are
-packed together, but each scan line must be zero-padded to end on a LONG
-boundary. Segment boundaries, however, can appear anywhere in the bitmap. The
-origin of the bitmap is the lower-left corner.
-
-The biBitCount member of the BITMAPINFOHEADER structure determines the number
-of bits which define each pixel and the maximum number of colors in the
-bitmap. This member may be set to any of the following values:
-
-Value   Meaning
-
-1       The bitmap is monochrome, and the bmciColors member must contain two
-entries. Each bit in the bitmap array represents a pixel. If the bit is
-clear, the pixel is displayed with the color of the first entry in the
-bmciColors table. If the bit is set, the pixel has the color of the second
-entry in the table.
-
-4       The bitmap has a maximum of 16 colors, and the bmciColors member
-contains 16 entries. Each pixel in the bitmap is represented by a four-bit
-index into the color table.
-
-For example, if the first byte in the bitmap is 0x1F, the byte represents two
-pixels. The first pixel contains the color in the second table entry, and the
-second pixel contains the color in the sixteenth table entry.
-
-8       The bitmap has a maximum of 256 colors, and the bmciColors member
-contains 256 entries. In this case, each byte in the array represents a
-single pixel.
-
-24      The bitmap has a maximum of 2^24 colors. The bmciColors member is
-NULL, and each 3-byte sequence in the bitmap array represents the relative
-intensities of red, green, and blue, respectively, of a pixel.
-
-The biClrUsed member of the BITMAPINFOHEADER structure specifies the number
-of color indexes in the color table actually used by the bitmap. If the
-biClrUsed member is set to zero, the bitmap uses the maximum number of colors
-corresponding to the value of the biBitCount member.
-
-The colors in the bmiColors table should appear in order of importance.
-Alternatively, for functions that use DIBs, the bmiColors member can be an
-array of 16-bit unsigned integers that specify an index into the currently
-realized logical palette instead of explicit RGB values. In this case, an
-application using the bitmap must call DIB functions with the wUsage
-parameter set to DIB_PAL_COLORS.
-
-Note:   The bmiColors member should not contain palette indexes if the bitmap
-is to be stored in a file or transferred to another application. Unless the
-application uses the bitmap exclusively and under its complete control, the
-bitmap color table should contain explicit RGB values.
-
-See Also
-
-BITMAPINFOHEADER, RGBQUAD 
-
-==============================================================================
-BITMAPINFOHEADER (3.0)
-
-
-
-typedef struct tagBITMAPINFOHEADER {    /* bmih */
-    DWORD   biSize;
-    LONG    biWidth;
-    LONG    biHeight;
-    WORD    biPlanes;
-    WORD    biBitCount;
-    DWORD   biCompression;
-    DWORD   biSizeImage;
-    LONG    biXPelsPerMeter;
-    LONG    biYPelsPerMeter;
-    DWORD   biClrUsed;
-    DWORD   biClrImportant;
-} BITMAPINFOHEADER;
-
-The BITMAPINFOHEADER structure contains information about the dimensions and
-color format of a Windows 3.0 or later device-independent bitmap (DIB).
-
-Member          Description
-
-biSize          Specifies the number of bytes required by the
-BITMAPINFOHEADER structure.
-
-biWidth         Specifies the width of the bitmap, in pixels. 
-biHeightSpecifies the height of the bitmap, in pixels. 
-
-biPlanesSpecifies the number of planes for the target device. This
-member must be set to 1.
-
-biBitCount      Specifies the number of bits per pixel. This value must be 1,
-4, 8, or 24.
-
-biCompression   Specifies the type of compression for a compressed bitmap. It
-can be one of the following values:
-
-Value           Meaning
-
-BI_RGB          Specifies that the bitmap is not compressed. 
-
-BI_RLE8         Specifies a run-length encoded format for bitmaps with 8 bits
-per pixel. The compression format is a 2-byte format consisting of a count
-byte followed by a byte containing a color index.  For more information, see
-the following Comments section.
-
-BI_RLE4         Specifies a run-length encoded format for bitmaps with 4 bits
-per pixel. The compression format is a 2-byte format consisting of a count
-byte followed by two word-length color indexes.  For more information, see
-the following Comments section.
-
-biSizeImage     Specifies the size, in bytes, of the image. It is valid to
-set this member to zero if the bitmap is in the BI_RGB format.
-
-biXPelsPerMeter Specifies the horizontal resolution, in pixels per meter, of
-the target device for the bitmap. An application can use this value to select
-a bitmap from a resource group that best matches the characteristics of the
-current device.
-
-biYPelsPerMeter Specifies the vertical resolution, in pixels per meter, of
-the target device for the bitmap.
-
-biClrUsed       Specifies the number of color indexes in the color table
-actually used by the bitmap. If this value is zero, the bitmap uses the
-maximum number of colors corresponding to the value of the biBitCount member.
-For more information on the maximum sizes of the color table, see the
-description of the BITMAPINFO structure earlier in this topic.
-
-If the biClrUsed member is nonzero, it specifies the actual number of colors
-that the graphics engine or device driver will access if the biBitCount
-member is less than 24. If biBitCount is set to 24, biClrUsed specifies the
-size of the reference color table used to optimize performance of Windows
-color palettes.  If the bitmap is a packed bitmap (that is, a bitmap in which
-the bitmap array immediately follows the BITMAPINFO header and which is
-referenced by a single pointer), the biClrUsed member must be set to zero or
-to the actual size of the color table.
-
-biClrImportant  Specifies the number of color indexes that are considered
-important for displaying the bitmap. If this value is zero, all colors are
-important.
-
-Comments
-
-The BITMAPINFO structure combines the BITMAPINFOHEADER structure and a color
-table to provide a complete definition of the dimensions and colors of a
-Windows 3.0 or later DIB. For more information about specifying a Windows 3.0
-DIB, see the description of the BITMAPINFO structure.
-
-An application should use the information stored in the biSize member to
-locate the color table in a BITMAPINFO structure as follows:
-
-pColor = ((LPSTR) pBitmapInfo + (WORD) (pBitmapInfo->bmiHeader.biSize))
-
-Windows supports formats for compressing bitmaps that define their colors
-with 8 bits per pixel and with 4 bits per pixel. Compression reduces the disk
-and memory storage required for the bitmap. The following paragraphs describe
-these formats.
-
-BI_RLE8
-
-When the biCompression member is set to BI_RLE8, the bitmap is compressed
-using a run-length encoding format for an 8-bit bitmap. This format may be
-compressed in either of two modes: encoded and absolute. Both modes can occur
-anywhere throughout a single bitmap.
-
-Encoded mode consists of two bytes: the first byte specifies the number of
-consecutive pixels to be drawn using the color index contained in the second
-byte. In addition, the first byte of the pair can be set to zero to indicate
-an escape that denotes an end of line, end of bitmap, or a delta. The
-interpretation of the escape depends on the value of the second byte of the
-pair. The following list shows the meaning of the second byte:
-
-Value   Meaning
-
-0       End of line. 
-1       End of bitmap. 
-2       Delta. The two bytes following the escape contain unsigned values
-indicating the horizontal and vertical offset of the next pixel from the
-current position.
-
-Absolute mode is signaled by the first byte set to zero and the second byte
-set to a value between 0x03 and 0xFF. In absolute mode, the second byte
-represents the number of bytes that follow, each of which contains the color
-index of a single pixel. When the second byte is set to 2 or less, the escape
-has the same meaning as in encoded mode. In absolute mode, each run must be
-aligned on a word boundary.  The following example shows the hexadecimal
-values of an 8-bit compressed bitmap:
-
-
-
-03 04 05 06 00 03 45 56 67 00 02 78 00 02 05 01
-02 78 00 00 09 1E 00 01
-
-This bitmap would expand as follows (two-digit values represent a color index
-for a single pixel):
-
-
-
-04 04 04
-06 06 06 06 06
-45 56 67
-78 78
-move current position 5 right and 1 down
-78 78
-end of line
-1E 1E 1E 1E 1E 1E 1E 1E 1E
-end of RLE bitmap
-
-BI_RLE4
-
-When the biCompression member is set to BI_RLE4, the bitmap is compressed
-using a run-length encoding (RLE) format for a 4-bit bitmap, which also uses
-encoded and absolute modes. In encoded mode, the first byte of the pair
-contains the number of pixels to be drawn using the color indexes in the
-second byte. The second byte contains two color indexes, one in its
-high-order nibble (that is, its low-order four bits) and one in its low-order
-nibble. The first of the pixels is drawn using the color specified by the
-high-order nibble, the second is drawn using the color in the low-order
-nibble, the third is drawn with the color in the high-order nibble, and so
-on, until all the pixels specified by the first byte have been drawn.  In
-absolute mode, the first byte contains zero, the second byte contains the
-number of color indexes that follow, and subsequent bytes contain color
-indexes in their high- and low-order nibbles, one color index for each pixel.
-In absolute mode, each run must be aligned on a word boundary. The
-end-of-line, end-of-bitmap, and delta escapes also apply to BI_RLE4.
-
-The following example shows the hexadecimal values of a 4-bit compressed
-bitmap:
-
-
-
-03 04 05 06 00 06 45 56 67 00 04 78 00 02 05 01
-04 78 00 00 09 1E 00 01
-
-This bitmap would expand as follows (single-digit values represent a color
-index for a single pixel):
-
-
-
-0 4 0
-0 6 0 6 0
-4 5 5 6 6 7
-7 8 7 8
-move current position 5 right and 1 down
-7 8 7 8
-end of line
-1 E 1 E 1 E 1 E 1
-end of RLE bitmap
-
-See Also
-
-BITMAPINFO 
-
-==============================================================================
-RGBQUAD (3.0)
-
-
-
-typedef struct tagRGBQUAD {     /* rgbq */
-    BYTE    rgbBlue;
-    BYTE    rgbGreen;
-    BYTE    rgbRed;
-    BYTE    rgbReserved;
-} RGBQUAD;
-
-The RGBQUAD structure describes a color consisting of relative intensities of
-red, green, and blue. The bmiColors member of the BITMAPINFO structure
-consists of an array of RGBQUAD structures.
-
-Member          Description
-
-rgbBlue         Specifies the intensity of blue in the color. 
-rgbGreenSpecifies the intensity of green in the color. 
-rgbRed          Specifies the intensity of red in the color. 
-rgbReserved     Not used; must be set to zero. 
-
-See Also
-
-BITMAPINFO 
-
-==============================================================================
-RGB (2.x)
-
-COLORREF RGB(cRed, cGreen, cBlue)
-
-BYTE cRed;      /* red component of color       */
-BYTE cGreen;    /* green component of color     */
-BYTE cBlue;     /* blue component of color      */
-
-
-The RGB macro selects an RGB color based on the parameters supplied and the
-color capabilities of the output device.
-
-Parameter       Description
-
-cRed    Specifies the intensity of the red color field. 
-cGreen  Specifies the intensity of the green color field. 
-cBlue   Specifies the intensity of the blue color field. 
-
-Returns
-
-The return value specifies the resultant RGB color. 
-
-Comments
-
-The intensity for each argument can range from 0 through 255. If all three
-intensities are specified as zero, the result is black. If all three
-intensities are specified as 255, the result is white.
-
-Comments
-
-The RGB macro is defined in WINDOWS.H as follows: 
-
-
-
-#define RGB(r,g,b)   ((COLORREF)(((BYTE)(r)|((WORD)(g)<<8))| \
-    (((DWORD)(BYTE)(b))<<16)))
-
-See Also
-
-GetBValue, GetGValue, GetRValue, PALETTEINDEX, PALETTERGB
-
-==============================================================================
-BITMAPCOREINFO (3.0)
-
-
-
-typedef struct tagBITMAPCOREINFO {  /* bmci */
-    BITMAPCOREHEADER bmciHeader;
-    RGBTRIPLE        bmciColors[1];
-} BITMAPCOREINFO;
-
-The BITMAPCOREINFO structure fully defines the dimensions and color
-information for a device-independent bitmap (DIB).  Windows applications
-should use the BITMAPINFO structure instead of BITMAPCOREINFO whenever
-possible.
-
-Member          Description
-
-bmciHeader      Specifies a BITMAPCOREHEADER structure that contains
-information about the dimensions and color format of a DIB.
-
-bmciColors      Specifies an array of RGBTRIPLE structures that define the
-colors in the bitmap.
-
-Comments
-
-The BITMAPCOREINFO structure describes the dimensions and colors of a bitmap.
-It is followed immediately in memory by an array of bytes which define the
-pixels of the bitmap. The bits in the array are packed together, but each
-scan line must be zero-padded to end on a LONG boundary. Segment boundaries,
-however, can appear anywhere in the bitmap. The origin of the bitmap is the
-lower-left corner.
-
-The bcBitCount member of the BITMAPCOREHEADER structure determines the number
-of bits that define each pixel and the maximum number of colors in the
-bitmap. This member may be set to any of the following values:
-
-Value   Meaning
-
-1       The bitmap is monochrome, and the bmciColors member must contain two
-entries. Each bit in the bitmap array represents a pixel. If the bit is
-clear, the pixel is displayed with the color of the first entry in the
-bmciColors table. If the bit is set, the pixel has the color of the second
-entry in the table.
-
-4       The bitmap has a maximum of 16 colors, and the bmciColors member
-contains 16 entries. Each pixel in the bitmap is represented by a four-bit
-index into the color table.
-
-For example, if the first byte in the bitmap is 0x1F, the byte represents two
-pixels. The first pixel contains the color in the second table entry, and the
-second pixel contains the color in the sixteenth table entry.
-
-8       The bitmap has a maximum of 256 colors, and the bmciColors member
-contains 256 entries. In this case, each byte in the array represents a
-single pixel.
-
-24      The bitmap has a maximum of 2^24 colors. The bmciColors member is
-NULL, and each 3-byte sequence in the bitmap array represents the relative
-intensities of red, green, and blue, respectively, of a pixel.
-
-The colors in the bmciColors table should appear in order of importance.
-Alternatively, for functions that use DIBs, the bmciColors member can be an
-array of 16-bit unsigned integers that specify an index into the currently
-realized logical palette instead of explicit RGB values. In this case, an
-application using the bitmap must call DIB functions with the wUsage
-parameter set to DIB_PAL_COLORS.
-
-Note:   The bmciColors member should not contain palette indexes if the
-bitmap is to be stored in a file or transferred to another application.
-Unless the application uses the bitmap exclusively and under its complete
-control, the bitmap color table should contain explicit RGB values.
-
-See Also
-
-BITMAPINFO, BITMAPCOREHEADER, RGBTRIPLE 
-
-
-==============================================================================
-BITMAPCOREHEADER (3.0)
-
-
-
-typedef struct tagBITMAPCOREHEADER {    /* bmch */
-    DWORD   bcSize;
-    short   bcWidth;
-    short   bcHeight;
-    WORD    bcPlanes;
-    WORD    bcBitCount;
-} BITMAPCOREHEADER;
-
-The BITMAPCOREHEADER structure contains information about the dimensions and
-color format of a device-independent bitmap (DIB). Windows applications
-should use the BITMAPINFOHEADER structure instead of BITMAPCOREHEADER
-whenever possible.
-
-Member          Description
-
-bcSize          Specifies the number of bytes required by the
-BITMAPCOREHEADER structure.
-
-bcWidth         Specifies the width of the bitmap, in pixels. 
-bcHeightSpecifies the height of the bitmap, in pixels. 
-
-bcPlanesSpecifies the number of planes for the target device. This
-member must be set to 1.
-
-bcBitCount      Specifies the number of bits per pixel. This value must be 1,
-4, 8, or 24.
-
-Comments
-
-The BITMAPCOREINFO structure combines the BITMAPCOREHEADER structure and a
-color table to provide a complete definition of the dimensions and colors of
-a DIB. See the description of the BITMAPCOREINFO structure for more
-information about specifying a DIB.
-
-An application should use the information stored in the bcSize member to
-locate the color table in a BITMAPCOREINFO structure with a method such as
-the following:
-
-
-
-lpColor = ((LPSTR) pBitmapCoreInfo + (UINT) (pBitmapCoreInfo->bcSize))
-
-See Also
-
-BITMAPCOREINFO, BITMAPINFOHEADER, BITMAPINFOHEADER 
-
-=============================================================================
-RGBTRIPLE (3.0)
-
-
-
-typedef struct tagRGBTRIPLE {   /* rgbt */
-    BYTE    rgbtBlue;
-    BYTE    rgbtGreen;
-    BYTE    rgbtRed;
-} RGBTRIPLE;
-
-The RGBTRIPLE structure describes a color consisting of relative intensities
-of red, green, and blue. The bmciColors member of the BITMAPCOREINFO
-structure consists of an array of RGBTRIPLE structures.  Windows applications
-should use the BITMAPINFO structure instead of BITMAPCOREINFO whenever
-possible. The BITMAPINFO structure uses an RGBQUAD structure instead of the
-RGBTRIPLE structure.
-
-Member  Description
-
-rgbtBlueSpecifies the intensity of blue in the color. 
-rgbtGreen       Specifies the intensity of green in the color. 
-rgbtRed         Specifies the intensity of red in the color.
-
-See Also
-
-BITMAPCOREINFO, BITMAPINFO, RGBQUAD
-
-==============================================================================
+#endif
